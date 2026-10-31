@@ -1,0 +1,10 @@
+- insert:
+    - id: wechat-dingtalk-bridge
+      name: dsh-plugin-wechat-dingtalk-bridge
+      config:
+        enabled: true
+        mergeWindowSec: 60
+        dingtalkProfiles: []
+        includeGroupAt: true
+        atPrefix: true
+        wechatChannel: ilink

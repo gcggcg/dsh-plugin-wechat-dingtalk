@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "WeChat ⇄ DingTalk Bridge",
+    "description": "Receives DingTalk DMs and @me messages, then pushes them to your personal WeChat ClawBot in merged, concise messages."
+  }
+}
