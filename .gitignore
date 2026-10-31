@@ -1,5 +1,4 @@
 node_modules/
-plugin/node_modules/
 .tmp*/
 *.log
 probe.mjs
