@@ -1,0 +1,62 @@
+{
+  "name": "dsh-plugin-wechat-dingtalk-bridge",
+  "version": "0.1.1",
+  "private": false,
+  "type": "module",
+  "description": "寰俊 鈬?閽夐拤绉佷俊/@鎴?瀹炴椂妗ユ帴鎻掍欢锛圖WS 涓汉浜嬩欢璁㈤槄 + 寰俊 iLink 鏈哄櫒浜猴級",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "wechat",
+    "weixin",
+    "dingtalk",
+    "bridge",
+    "notification"
+  ],
+  "author": "gcggcg <1973606717@qq.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gcggcg/dsh-plugin-wechat-dingtalk.git"
+  },
+  "homepage": "https://github.com/gcggcg/dsh-plugin-wechat-dingtalk#readme",
+  "bugs": {
+    "url": "https://github.com/gcggcg/dsh-plugin-wechat-dingtalk/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "src",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "dsh": ">=0.2.1-rc.3 <0.3.0-0",
+    "node": ">=22.19.0"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": { "platform": "web", "immediately": true }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "qrcode": "^1.5.4"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "pack:check": "npm pack --dry-run"
+  }
+}
+
