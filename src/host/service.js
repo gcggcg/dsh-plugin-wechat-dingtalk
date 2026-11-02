@@ -12,7 +12,7 @@
  *   `event_id`.
  */
 
-import { spawnDws, runDws, killTree, createLineReader, parseDeviceFlow, resolveDwsCommand } from './dws.js';
+import { spawnDws, runDws, killTree, createLineReader, parseDeviceFlow, resolveDwsCommand, toText } from './dws.js';
 import { pushClawBot, pushWxPusher } from './push.js';
 import { beginLogin as beginWeixinLogin, pollLogin as pollWeixinLogin, getUpdates as getWeixinUpdates, sendText as sendWeixinText, inboundContext } from './weixin.js';
 import { readFile, mkdir, writeFile, unlink } from 'node:fs/promises';
@@ -37,6 +37,15 @@ function isObject(value) {
 function clip(text, limit) {
   const value = typeof text === 'string' ? text : String(text ?? '');
   return value.length > limit ? `${value.slice(0, Math.max(0, limit - 1))}…` : value;
+}
+
+/** Strip control characters and replacement glyphs from CLI output for the UI. */
+function sanitizeOutput(text) {
+  return String(text ?? '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+    .replace(/\uFFFD/g, '')
+    .trim()
+    .slice(-600);
 }
 
 /** Parse the first JSON object embedded in CLI output (version notices may precede it). */
@@ -149,32 +158,76 @@ export class BridgeService {
     const nodeDir = process.platform === 'win32'
       ? process.execPath.replace(/[\\/]node\.exe$/i, '')
       : process.execPath.replace(/[\\/]bin[\\/]node$/i, '');
-    const npm = process.platform === 'win32'
-      ? join(nodeDir, 'npm.cmd')
-      : join(nodeDir, 'bin', 'npm');
-    const install = await runDws(npm, ['install', '-g', 'dingtalk-workspace-cli', '--no-fund', '--no-audit'], { timeoutMs: 600_000 });
-    if (install.code !== 0) {
-      this.state.install = { status: 'error', log: `${install.stdout}\n${install.stderr}`.slice(-800) };
-      this.broadcast();
-      return false;
-    }
-    const postinstall = join(nodeDir, 'node_modules', 'dingtalk-workspace-cli', 'install.js');
-    if (existsSync(postinstall)) {
-      const post = await runDws(process.execPath, [postinstall], {
-        timeoutMs: 300_000,
-        env: { ...process.env, DWS_NO_SKILLS: '1' },
-      });
-      if (post.code !== 0) {
-        this.state.install = { status: 'error', log: `${post.stdout}\n${post.stderr}`.slice(-800) };
-        this.broadcast();
-        return false;
+    const npm = await this.findNpm(nodeDir);
+    let ok = false;
+    if (npm) {
+      const install = await runDws(npm, ['install', '-g', 'dingtalk-workspace-cli', '--no-fund', '--no-audit'], { timeoutMs: 600_000 });
+      if (install.code !== 0) {
+        this.state.install = { status: 'error', log: sanitizeOutput(`${install.stdout}\n${install.stderr}`) };
+      } else {
+        const root = await this.npmGlobalRoot(npm);
+        const pkgDir = join(root || join(nodeDir, 'node_modules'), 'dingtalk-workspace-cli');
+        const postinstall = join(pkgDir, 'install.js');
+        if (existsSync(postinstall)) {
+          const post = await runDws(process.execPath, [postinstall], {
+            timeoutMs: 300_000,
+            env: { ...process.env, DWS_NO_SKILLS: '1' },
+          });
+          if (post.code !== 0) {
+            this.state.install = { status: 'error', log: sanitizeOutput(`${post.stdout}\n${post.stderr}`) };
+          } else {
+            ok = true;
+          }
+        } else {
+          ok = true;
+        }
+        const vendor = join(pkgDir, 'vendor', process.platform === 'win32' ? 'dws.exe' : 'dws');
+        if (ok && existsSync(vendor)) this.command = vendor;
       }
+    } else if (process.platform === 'win32') {
+      const ps = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      const script = "$ErrorActionPreference='Stop'; irm https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.ps1 | iex";
+      const result = await runDws(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeoutMs: 600_000 });
+      ok = result.code === 0;
+      if (!ok) this.state.install = { status: 'error', log: sanitizeOutput(`${result.stdout}\n${result.stderr}`) };
     }
-    const vendor = join(nodeDir, 'node_modules', 'dingtalk-workspace-cli', 'vendor', 'dws.exe');
-    if (process.platform === 'win32' && existsSync(vendor)) this.command = vendor;
-    this.state.install = { status: 'ready', log: '安装完成' };
+    if (ok) {
+      const verify = await runDws(this.command, ['--version'], { timeoutMs: 20_000 });
+      if (verify.code === 0) {
+        this.state.install = { status: 'ready', log: '安装完成' };
+        this.broadcast();
+        return true;
+      }
+      this.state.install = { status: 'error', log: sanitizeOutput(`${verify.stdout}\n${verify.stderr}`) || '安装后仍无法执行 dws' };
+    } else if (!this.state.install.log) {
+      this.state.install = { status: 'error', log: '未找到 npm，且自动安装脚本执行失败' };
+    }
     this.broadcast();
-    return true;
+    return false;
+  }
+
+  /** Locate a usable npm executable (bundled runtime, PATH, or npm_execpath). */
+  async findNpm(nodeDir) {
+    const candidates = [];
+    if (typeof process.env.npm_execpath === 'string' && process.env.npm_execpath.trim() !== '') {
+      candidates.push(process.env.npm_execpath.trim());
+    }
+    candidates.push(process.platform === 'win32' ? join(nodeDir, 'npm.cmd') : join(nodeDir, 'bin', 'npm'));
+    for (const candidate of candidates) {
+      if (!existsSync(candidate)) continue;
+      const probe = await runDws(candidate, ['--version'], { timeoutMs: 15_000 });
+      if (probe.code === 0) return candidate;
+    }
+    const which = await runDws(process.platform === 'win32' ? 'where' : 'which', ['npm'], { timeoutMs: 10_000 });
+    const found = which.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)[0];
+    return found || '';
+  }
+
+  /** Resolve the global npm root for postinstall and vendor lookup. */
+  async npmGlobalRoot(npm) {
+    const result = await runDws(npm, ['root', '-g'], { timeoutMs: 20_000 });
+    if (result.code !== 0) return '';
+    return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).pop() ?? '';
   }
 
   // ------------------------------------------------------------------ wechat
@@ -731,14 +784,26 @@ export class BridgeService {
   // ------------------------------------------------------------------- login
 
   /** Start a device-flow login and surface its code / URL to the UI. */
-  startLogin() {
+  async startLogin() {
     if (this.loginChild) return;
     this.state.login = { active: true, code: '', url: '', error: '' };
+    this.broadcast();
+    const ready = await this.ensureDws();
+    if (!ready) {
+      this.state.login = {
+        active: false,
+        code: '',
+        url: '',
+        error: `dws 未安装且自动安装失败：${this.state.install.log || '请检查网络后重试'}`,
+      };
+      this.broadcast();
+      return;
+    }
     this.loginBuffer = '';
     const child = spawnDws(this.command, ['auth', 'login', '--device']);
     this.loginChild = child;
     const consume = (chunk) => {
-      this.loginBuffer += chunk.toString('utf8');
+      this.loginBuffer += toText(chunk);
       const parsed = parseDeviceFlow(this.loginBuffer);
       if (parsed.code && parsed.code !== this.state.login.code) this.state.login.code = parsed.code;
       if (parsed.url && parsed.url !== this.state.login.url) this.state.login.url = parsed.url;
@@ -755,7 +820,7 @@ export class BridgeService {
           .catch(() => {});
       } else {
         const tail = this.loginBuffer.split(/\r?\n/).filter(Boolean).slice(-3).join(' ');
-        this.state.login.error = tail || `dws auth login exited with code ${code}`;
+        this.state.login.error = sanitizeOutput(tail) || `dws auth login exited with code ${code}`;
       }
       this.broadcast();
     });
@@ -862,7 +927,9 @@ export class BridgeService {
       } else if (type === 'test-push') {
         await this.deliver(`测试：微信⇄钉钉桥接已连通 ${new Date().toLocaleTimeString('zh-CN')}`);
       } else if (type === 'login-start') {
-        this.startLogin();
+        await this.startLogin();
+      } else if (type === 'install-dws') {
+        await this.ensureDws();
       } else if (type === 'login-cancel') {
         this.cancelLogin();
       } else if (type === 'reset-quota') {

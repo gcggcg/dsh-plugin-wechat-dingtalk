@@ -47,6 +47,7 @@ window.__ModuleLoader__.load({
       const [notice, setNotice] = useState('');
       const [mergeInput, setMergeInput] = useState('');
       const [stars, setStars] = useState(null);
+      const [showGuide, setShowGuide] = useState(false);
 
       const load = useCallback(async () => {
         try {
@@ -113,7 +114,17 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.row },
             h('span', { style: styles.muted }, `投递通道：${state.wechat?.channel === 'clawbot' ? 'PushPlus ClawBot' : '微信机器人（本插件扫码）'}${channels.pushplus ? ' + PushPlus' : ''}${channels.wxpusher ? ' + WxPusher' : ''}`),
             h('span', { style: styles.muted }, `dws：${state.install?.status === 'ready' ? '已就绪' : state.install?.status === 'installing' ? '安装中…' : state.install?.status === 'error' ? '安装失败' : '检测中'}`),
+            state.install?.status !== 'ready'
+              ? h('button', {
+                style: styles.button,
+                onClick: () => act('install-dws'),
+                disabled: busy === 'install-dws' || state.install?.status === 'installing',
+              }, busy === 'install-dws' || state.install?.status === 'installing' ? '安装中…' : '安装 dws')
+              : null,
           ),
+          state.install?.status === 'error' && state.install?.log
+            ? h('div', { style: { color: '#ef4444', fontSize: '12px', wordBreak: 'break-all' } }, state.install.log)
+            : null,
           h('div', { style: styles.row },
             h('span', { style: styles.muted }, '合并窗口'),
             h('input', {
@@ -266,6 +277,21 @@ window.__ModuleLoader__.load({
           ),
         ),
 
+        showGuide
+          ? h('div', { style: styles.card },
+            h('div', { style: styles.title }, '使用说明'),
+            h('ol', { style: { margin: '4px 0 0 18px', padding: 0, lineHeight: '1.8' } },
+              h('li', null, '等待「dws：已就绪」；若显示安装失败，点「安装 dws」或手动执行 npm i -g dingtalk-workspace-cli。'),
+              h('li', null, '钉钉：点「钉钉扫码/设备码登录」，用钉钉完成授权（组织需已开通 CLI 数据访问）。'),
+              h('li', null, '微信：点「微信扫码登录」，用微信扫码绑定机器人。'),
+              h('li', null, '首次关键一步：在微信里主动给机器人发一条消息（如「你好」），建立推送上下文；否则不会收到推送。'),
+              h('li', null, '让朋友发钉钉私信或在群里 @ 你，等待合并窗口后即可在微信收到。'),
+            ),
+            h('div', { style: { ...styles.muted, marginTop: '8px' } },
+              '微信平台限制：每连续推送 10 条后，需要你在微信里主动给机器人发一条消息才能继续；建议把「合并窗口」调大（如 60–120 秒），把多条消息合并成一条以减少推送次数。'),
+          )
+          : null,
+
         h('div', {
           style: {
             ...styles.row,
@@ -274,6 +300,10 @@ window.__ModuleLoader__.load({
             borderTop: '1px solid var(--dsw-alias-border-default, #e5e7eb)',
           },
         },
+        h('button', {
+          style: styles.button,
+          onClick: () => setShowGuide((value) => !value),
+        }, showGuide ? '收起说明' : '📖 使用说明'),
         h('a', {
           href: REPO,
           target: '_blank',

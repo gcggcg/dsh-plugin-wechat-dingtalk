@@ -8,6 +8,18 @@
 
 import { spawn } from 'node:child_process';
 
+/** Decode child output that may be UTF-8 or the Windows console code page. */
+export function toText(chunk) {
+  const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk ?? ''));
+  const utf8 = buffer.toString('utf8');
+  if (!utf8.includes('\uFFFD')) return utf8;
+  try {
+    return new TextDecoder('gbk').decode(buffer);
+  } catch {
+    return utf8;
+  }
+}
+
 /** Resolve the configured command, defaulting to `dws` on PATH. */
 export function resolveDwsCommand(configured) {
   const value = typeof configured === 'string' ? configured.trim() : '';
@@ -33,7 +45,8 @@ export function spawnDws(command, args, env) {
   const options = { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: env ?? process.env };
   if (isWindows && !direct) {
     const line = [command, ...args].map(quoteForCmd).join(' ');
-    return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', line], options);
+    // Force UTF-8 so cmd.exe's own errors ("not recognized", ...) are not GBK mojibake.
+    return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `chcp 65001>nul & ${line}`], options);
   }
   return spawn(command, args, options);
 }
@@ -62,8 +75,8 @@ export function runDws(command, args, opts = {}) {
       killTree(child);
       finish({ code: -1, stdout, stderr, timedOut: true });
     }, timeoutMs);
-    child.stdout?.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
-    child.stderr?.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+    child.stdout?.on('data', (chunk) => { stdout += toText(chunk); });
+    child.stderr?.on('data', (chunk) => { stderr += toText(chunk); });
     child.on('error', (error) => finish({ code: -1, stdout, stderr: `${stderr}\n${error.message}` }));
     child.on('exit', (code) => finish({ code: code ?? -1, stdout, stderr }));
   });
@@ -93,7 +106,7 @@ export function killTree(child) {
 export function createLineReader() {
   let pending = '';
   return (chunk) => {
-    pending += chunk.toString('utf8');
+    pending += toText(chunk);
     const lines = pending.split(/\r?\n/);
     pending = lines.pop() ?? '';
     return lines.filter((line) => line.trim() !== '');
