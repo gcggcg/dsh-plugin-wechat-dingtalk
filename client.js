@@ -13,6 +13,8 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
     const { useEffect, useState, useCallback } = React;
     const API = '/api/wechat-dingtalk';
+    const REPO = 'https://github.com/gcggcg/dsh-plugin-wechat-dingtalk';
+    const ISSUES = `${REPO}/issues/new`;
 
     const styles = {
       page: { padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '14px', fontSize: '13px' },
@@ -44,6 +46,7 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState('');
       const [notice, setNotice] = useState('');
       const [mergeInput, setMergeInput] = useState('');
+      const [stars, setStars] = useState(null);
 
       const load = useCallback(async () => {
         try {
@@ -65,6 +68,17 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         if (state?.mergeWindowSec !== undefined) setMergeInput(String(state.mergeWindowSec));
       }, [state?.mergeWindowSec]);
+
+      useEffect(() => {
+        let active = true;
+        fetch('https://api.github.com/repos/gcggcg/dsh-plugin-wechat-dingtalk')
+          .then((response) => (response.ok ? response.json() : undefined))
+          .then((data) => {
+            if (active && typeof data?.stargazers_count === 'number') setStars(data.stargazers_count);
+          })
+          .catch(() => { /* offline or blocked: keep the plain label */ });
+        return () => { active = false; };
+      }, []);
 
       const act = async (type, extra) => {
         setBusy(type);
@@ -251,7 +265,51 @@ window.__ModuleLoader__.load({
               )),
           ),
         ),
+
+        h('div', {
+          style: {
+            ...styles.row,
+            marginTop: '6px',
+            paddingTop: '10px',
+            borderTop: '1px solid var(--dsw-alias-border-default, #e5e7eb)',
+          },
+        },
+        h('a', {
+          href: REPO,
+          target: '_blank',
+          rel: 'noreferrer',
+          style: { ...styles.button, textDecoration: 'none', color: 'inherit', display: 'inline-block' },
+        }, `⭐ Star${stars !== null ? ` (${stars})` : ''}`),
+        h('a', {
+          href: ISSUES,
+          target: '_blank',
+          rel: 'noreferrer',
+          style: { ...styles.button, textDecoration: 'none', color: 'inherit', display: 'inline-block' },
+        }, '🐞 提交 Issue'),
+        h('span', { style: styles.muted }, '欢迎点赞或反馈问题'),
+        ),
       );
+    }
+
+    /** Sidebar icon for the global panel entry. */
+    function BridgeIcon(props) {
+      const size = Number(props?.size) || 20;
+      return h('svg', {
+        viewBox: '0 0 64 64',
+        width: size,
+        height: size,
+        'aria-hidden': true,
+        style: { display: 'block' },
+      },
+      h('rect', { width: 64, height: 64, rx: 14, fill: '#0f172a' }),
+      h('path', {
+        d: 'M14 20h22a6 6 0 0 1 6 6v8a6 6 0 0 1-6 6H24l-7 6v-6h-3a6 6 0 0 1-6-6v-8a6 6 0 0 1 6-6z',
+        fill: '#22c55e',
+      }),
+      h('path', {
+        d: 'M40 26h10a6 6 0 0 1 6 6v6a6 6 0 0 1-6 6h-2v5l-6-5h-2a6 6 0 0 1-6-6v-6a6 6 0 0 1 6-6z',
+        fill: '#38bdf8',
+      }));
     }
 
     return {
@@ -267,6 +325,16 @@ window.__ModuleLoader__.load({
         ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
           name: 'plugins.bundle.config',
           key: 'dsh-plugin-wechat-dingtalk-bridge',
+        }, BoundPanel));
+        ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+          name: 'sidebar.panellist',
+          id: 'wechat-dingtalk',
+          order: 20,
+          label: '微信⇄钉钉',
+        }, BridgeIcon));
+        ctx.slots.inject('main', () => ctx.slots.register({
+          name: 'main',
+          key: 'wechat-dingtalk',
         }, BoundPanel));
       },
     };
