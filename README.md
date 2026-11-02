@@ -1,5 +1,8 @@
 # 微信 ⇄ 钉钉桥接（DSH 插件）
 
+[![开放插件市场](https://img.shields.io/endpoint?url=https%3A%2F%2Fdshopen.org%2Fbadge%2Fdsh-plugin-wechat-dingtalk-bridge.json)](https://dshopen.org/zh/plugins/dsh-plugin-wechat-dingtalk-bridge/)
+[![npm](https://img.shields.io/npm/v/dsh-plugin-wechat-dingtalk-bridge.svg)](https://www.npmjs.com/package/dsh-plugin-wechat-dingtalk-bridge)
+
 实时接收钉钉**私信**与**群 @我**消息，按可配置窗口合并后推送到**个人微信机器人**（插件内置腾讯 iLink 扫码登录）。
 
 ## 功能
