@@ -117,17 +117,21 @@ window.__ModuleLoader__.load({
             h('span', { style: styles.muted }, '秒'),
             h('button', { style: styles.button, onClick: () => act('set-merge-window', { seconds: Number(mergeInput) }) }, '保存'),
           ),
-          h('div', { style: styles.row },
-            h('span', { style: styles.muted }, `配额：已推 ${state.quota?.pushes ?? 0} 条`),
-            state.quota?.blocked ? h('span', { style: { color: '#ef4444' } }, 'ClawBot 配额已满，请在微信里回复 ClawBot 后点“重置配额”') : null,
-            state.quota?.warned && !state.quota?.blocked ? h('span', { style: { color: '#f59e0b' } }, '接近配额上限') : null,
-          ),
+          state.wechat?.channel === 'clawbot'
+            ? h('div', { style: styles.row },
+              h('span', { style: styles.muted }, `配额：已推 ${state.quota?.pushes ?? 0} 条`),
+              state.quota?.blocked ? h('span', { style: { color: '#ef4444' } }, 'ClawBot 配额已满，请在微信里回复 ClawBot 后点“重置配额”') : null,
+              state.quota?.warned && !state.quota?.blocked ? h('span', { style: { color: '#f59e0b' } }, '接近配额上限') : null,
+            )
+            : null,
           state.lastPush ? h('div', { style: { ...styles.row, ...styles.muted } },
             `最近推送：${state.lastPush.ok ? `成功（${state.lastPush.channel}）` : `失败 - ${state.lastPush.error}`}`,
           ) : null,
           h('div', { style: styles.row },
             h('button', { style: styles.button, onClick: () => act('test-push'), disabled: busy === 'test-push' }, busy === 'test-push' ? '发送中…' : '发送测试消息'),
-            h('button', { style: styles.button, onClick: () => act('reset-quota') }, '重置配额'),
+            state.wechat?.channel === 'clawbot'
+              ? h('button', { style: styles.button, onClick: () => act('reset-quota') }, '重置配额')
+              : null,
             h('button', { style: styles.button, onClick: () => act('restart') }, '重启监听'),
             h('button', { style: styles.button, onClick: () => act('reset-subscription') }, '重置订阅保护'),
           ),

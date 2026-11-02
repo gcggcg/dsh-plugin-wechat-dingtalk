@@ -241,11 +241,14 @@ export class BridgeService {
   }
 
   /** Change what the listeners subscribe to and restart them. */
-  setListenFlags(direct, groupAt) {
+  async setListenFlags(direct, groupAt) {
     this.listenFlags = { direct: direct !== false, groupAt: groupAt !== false };
     this.syncListenState();
-    this.saveWeixinState().catch(() => {});
-    this.restartAllListeners();
+    await this.saveWeixinState().catch(() => {});
+    // A deliberate restart must also clear dws' subscription-protection lock,
+    // otherwise the new listener hits `personal_subscription_in_flight` and
+    // stays stopped until the cooldown expires.
+    await this.resetSubscriptionProtection();
     this.broadcast();
     return { ...this.listenFlags };
   }
@@ -592,6 +595,8 @@ export class BridgeService {
       }
     }
     for (const profile of [...this.listeners.keys()]) this.stopListener(profile);
+    // Give the old bus a moment to exit before re-subscribing.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
     this.startAllListeners();
   }
 
@@ -746,7 +751,7 @@ export class BridgeService {
       this.state.login.active = false;
       if (code === 0) {
         this.refreshProfiles()
-          .then(() => this.restartAllListeners())
+          .then(() => this.resetSubscriptionProtection())
           .catch(() => {});
       } else {
         const tail = this.loginBuffer.split(/\r?\n/).filter(Boolean).slice(-3).join(' ');
@@ -836,7 +841,7 @@ export class BridgeService {
     const type = String(payload?.type ?? '');
     try {
       if (type === 'restart') {
-        this.restartAllListeners();
+        await this.resetSubscriptionProtection();
       } else if (type === 'refresh-profiles') {
         await this.refreshProfiles();
       } else if (type === 'wechat-login-start') {
@@ -846,7 +851,7 @@ export class BridgeService {
       } else if (type === 'set-merge-window') {
         this.setMergeWindow(payload?.seconds);
       } else if (type === 'set-listen-flags') {
-        this.setListenFlags(payload?.direct, payload?.groupAt);
+        await this.setListenFlags(payload?.direct, payload?.groupAt);
       } else if (type === 'reset-subscription') {
         await this.resetSubscriptionProtection();
       } else if (type === 'wechat-check-context') {
