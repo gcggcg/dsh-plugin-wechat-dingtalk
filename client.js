@@ -113,7 +113,11 @@ window.__ModuleLoader__.load({
           ),
           h('div', { style: styles.row },
             h('span', { style: styles.muted }, `投递通道：${state.wechat?.channel === 'clawbot' ? 'PushPlus ClawBot' : '微信机器人（本插件扫码）'}${channels.pushplus ? ' + PushPlus' : ''}${channels.wxpusher ? ' + WxPusher' : ''}`),
-            h('span', { style: styles.muted }, `dws：${state.install?.status === 'ready' ? '已就绪' : state.install?.status === 'installing' ? '安装中…' : state.install?.status === 'error' ? '安装失败' : '检测中'}`),
+            h('span', { style: styles.muted }, `dws：${state.install?.status === 'ready'
+              ? '已就绪'
+              : state.install?.status === 'installing'
+                ? `安装中（${state.install.source || '...'} ${state.install.attempt ?? 1}/${state.install.total ?? 1}）`
+                : state.install?.status === 'error' ? '安装失败' : '检测中'}`),
             state.install?.status !== 'ready'
               ? h('button', {
                 style: styles.button,
@@ -122,8 +126,15 @@ window.__ModuleLoader__.load({
               }, busy === 'install-dws' || state.install?.status === 'installing' ? '安装中…' : '安装 dws')
               : null,
           ),
-          state.install?.status === 'error' && state.install?.log
-            ? h('div', { style: { color: '#ef4444', fontSize: '12px', wordBreak: 'break-all' } }, state.install.log)
+          state.install?.log
+            ? h('div', {
+              style: {
+                color: state.install?.status === 'error' ? '#ef4444' : '#6b7280',
+                fontSize: '12px',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-all',
+              },
+            }, state.install.log)
             : null,
           h('div', { style: styles.row },
             h('span', { style: styles.muted }, '合并窗口'),
@@ -286,6 +297,7 @@ window.__ModuleLoader__.load({
               h('li', null, '微信：点「微信扫码登录」，用微信扫码绑定机器人。'),
               h('li', null, '首次关键一步：在微信里主动给机器人发一条消息（如「你好」），建立推送上下文；否则不会收到推送。'),
               h('li', null, '让朋友发钉钉私信或在群里 @ 你，等待合并窗口后即可在微信收到。'),
+              h('li', null, '若市场装到的是旧版本（pnpm 供应链观察期 minimumReleaseAge 会跳过刚发布的版本），可卸载后指定版本安装，或等待观察期结束。'),
             ),
             h('div', { style: { ...styles.muted, marginTop: '8px' } },
               '微信平台限制：每连续推送 10 条后，需要你在微信里主动给机器人发一条消息才能继续；建议把「合并窗口」调大（如 60–120 秒），把多条消息合并成一条以减少推送次数。'),

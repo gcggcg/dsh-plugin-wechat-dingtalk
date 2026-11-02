@@ -109,8 +109,9 @@ export class BridgeService {
         sendsSinceContext: 0,
         login: { active: false, qrcodeUrl: '', status: '', error: '' },
       },
-      install: { status: 'unknown', log: '' },
+      install: { status: 'unknown', log: '', source: '', attempt: 0, total: 0 },
     };
+    this.installPromise = null;
   }
 
   /** Resolve profiles in the background, then start listeners. */
@@ -146,62 +147,103 @@ export class BridgeService {
     if (this.weixin.token) this.startWeixinUpdates();
   }
 
-  /** Install `dws` when the machine has none, then resolve its command path. */
+  /** Install `dws` when the machine has none, trying multiple sources in turn. */
   async ensureDws() {
+    if (this.installPromise) return this.installPromise;
+    this.installPromise = this.runEnsureDws().finally(() => { this.installPromise = null; });
+    return this.installPromise;
+  }
+
+  /** One install attempt chain: npmjs → npmmirror → official script. */
+  async runEnsureDws() {
     const check = await runDws(this.command, ['--version'], { timeoutMs: 15_000 });
     if (check.code === 0 && /dws version/i.test(`${check.stdout}${check.stderr}`)) {
-      this.state.install = { status: 'ready', log: '' };
+      this.state.install = { status: 'ready', log: '', source: '', attempt: 0, total: 0 };
       return true;
     }
-    this.state.install = { status: 'installing', log: '正在安装 dingtalk-workspace-cli…' };
-    this.broadcast();
     const nodeDir = process.platform === 'win32'
       ? process.execPath.replace(/[\\/]node\.exe$/i, '')
       : process.execPath.replace(/[\\/]bin[\\/]node$/i, '');
     const npm = await this.findNpm(nodeDir);
-    let ok = false;
+    const sources = [];
     if (npm) {
-      const install = await runDws(npm, ['install', '-g', 'dingtalk-workspace-cli', '--no-fund', '--no-audit'], { timeoutMs: 600_000 });
-      if (install.code !== 0) {
-        this.state.install = { status: 'error', log: sanitizeOutput(`${install.stdout}\n${install.stderr}`) };
-      } else {
-        const root = await this.npmGlobalRoot(npm);
-        const pkgDir = join(root || join(nodeDir, 'node_modules'), 'dingtalk-workspace-cli');
-        const postinstall = join(pkgDir, 'install.js');
-        if (existsSync(postinstall)) {
-          const post = await runDws(process.execPath, [postinstall], {
-            timeoutMs: 300_000,
-            env: { ...process.env, DWS_NO_SKILLS: '1' },
-          });
-          if (post.code !== 0) {
-            this.state.install = { status: 'error', log: sanitizeOutput(`${post.stdout}\n${post.stderr}`) };
+      sources.push({ id: 'npmjs', label: 'npm 官方源', kind: 'npm', npm, registry: 'https://registry.npmjs.org/' });
+      sources.push({ id: 'npmmirror', label: 'npmmirror 镜像', kind: 'npm', npm, registry: 'https://registry.npmmirror.com' });
+    }
+    if (process.platform === 'win32') {
+      sources.push({ id: 'github', label: '官方安装脚本', kind: 'ps1' });
+    }
+    if (sources.length === 0) {
+      this.state.install = { status: 'error', log: '未找到 npm，且没有可用安装源', source: '', attempt: 0, total: 0 };
+      this.broadcast();
+      return false;
+    }
+
+    const failures = [];
+    for (let index = 0; index < sources.length; index += 1) {
+      const source = sources[index];
+      this.state.install = {
+        status: 'installing',
+        source: source.id,
+        attempt: index + 1,
+        total: sources.length,
+        log: `正在尝试 ${source.label}（${index + 1}/${sources.length}）…`,
+      };
+      this.broadcast();
+
+      let ok = false;
+      let detail = '';
+      if (source.kind === 'npm') {
+        const install = await runDws(source.npm, [
+          'install', '-g', 'dingtalk-workspace-cli', '--no-fund', '--no-audit',
+          `--registry=${source.registry}`,
+        ], { timeoutMs: 180_000 });
+        if (install.code !== 0) {
+          detail = sanitizeOutput(`${install.stdout}\n${install.stderr}`) || `退出码 ${install.code}`;
+        } else {
+          const root = await this.npmGlobalRoot(source.npm);
+          const pkgDir = join(root || join(nodeDir, 'node_modules'), 'dingtalk-workspace-cli');
+          const postinstall = join(pkgDir, 'install.js');
+          if (existsSync(postinstall)) {
+            const post = await runDws(process.execPath, [postinstall], {
+              timeoutMs: 180_000,
+              env: { ...process.env, DWS_NO_SKILLS: '1' },
+            });
+            if (post.code !== 0) detail = sanitizeOutput(`${post.stdout}\n${post.stderr}`) || `解包退出码 ${post.code}`;
+            else ok = true;
           } else {
             ok = true;
           }
-        } else {
-          ok = true;
+          const vendor = join(pkgDir, 'vendor', process.platform === 'win32' ? 'dws.exe' : 'dws');
+          if (ok && existsSync(vendor)) this.command = vendor;
         }
-        const vendor = join(pkgDir, 'vendor', process.platform === 'win32' ? 'dws.exe' : 'dws');
-        if (ok && existsSync(vendor)) this.command = vendor;
+      } else {
+        const ps = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+        const script = "$ErrorActionPreference='Stop'; irm https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.ps1 | iex";
+        const result = await runDws(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeoutMs: 240_000 });
+        ok = result.code === 0;
+        if (!ok) detail = sanitizeOutput(`${result.stdout}\n${result.stderr}`) || `退出码 ${result.code}`;
       }
-    } else if (process.platform === 'win32') {
-      const ps = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-      const script = "$ErrorActionPreference='Stop'; irm https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.ps1 | iex";
-      const result = await runDws(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeoutMs: 600_000 });
-      ok = result.code === 0;
-      if (!ok) this.state.install = { status: 'error', log: sanitizeOutput(`${result.stdout}\n${result.stderr}`) };
-    }
-    if (ok) {
-      const verify = await runDws(this.command, ['--version'], { timeoutMs: 20_000 });
-      if (verify.code === 0) {
-        this.state.install = { status: 'ready', log: '安装完成' };
-        this.broadcast();
-        return true;
+
+      if (ok) {
+        const verify = await runDws(this.command, ['--version'], { timeoutMs: 20_000 });
+        if (verify.code === 0) {
+          this.state.install = { status: 'ready', log: '', source: source.id, attempt: index + 1, total: sources.length };
+          this.broadcast();
+          return true;
+        }
+        detail = sanitizeOutput(`${verify.stdout}\n${verify.stderr}`) || '安装后仍无法执行 dws';
       }
-      this.state.install = { status: 'error', log: sanitizeOutput(`${verify.stdout}\n${verify.stderr}`) || '安装后仍无法执行 dws' };
-    } else if (!this.state.install.log) {
-      this.state.install = { status: 'error', log: '未找到 npm，且自动安装脚本执行失败' };
+      failures.push(`${source.label}：${detail || '未知错误'}`);
     }
+
+    this.state.install = {
+      status: 'error',
+      source: '',
+      attempt: sources.length,
+      total: sources.length,
+      log: failures.join('\n').slice(-900),
+    };
     this.broadcast();
     return false;
   }

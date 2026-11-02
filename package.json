@@ -1,9 +1,9 @@
 {
   "name": "dsh-plugin-wechat-dingtalk-bridge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": false,
   "type": "module",
-  "description": "寰俊 鈬?閽夐拤绉佷俊/@鎴?瀹炴椂妗ユ帴鎻掍欢锛圖WS 涓汉浜嬩欢璁㈤槄 + 寰俊 iLink 鏈哄櫒浜猴級",
+  "description": "微信 ⇄ 钉钉私信/@我 实时桥接插件（DWS 个人事件订阅 + 微信 iLink 机器人）",
   "keywords": [
     "deepseek-harness",
     "dsh",
@@ -59,4 +59,3 @@
     "pack:check": "npm pack --dry-run"
   }
 }
-
