@@ -27,6 +27,8 @@ const AT_KEY = 'user_im_message_receive_at';
 const MAX_RECENT = 20;
 const QUOTA_WARN = 8;
 const QUOTA_BLOCK = 10;
+const DWS_PACKAGE_VERSION = '1.0.66';
+const DWS_REGISTRY_DEFAULT = 'https://registry.npmjs.org/';
 
 /** @param {unknown} value */
 function isObject(value) {
@@ -138,114 +140,123 @@ export class BridgeService {
     };
   }
 
-  /** Load persisted WeChat state, install dws, then start listeners. */
+  /** Load persisted WeChat state, detect dws (never install), then start listeners. */
   async bootstrap() {
     await this.loadWeixinState();
-    await this.ensureDws();
+    await this.checkDws();
     await this.refreshProfiles();
     this.startAllListeners();
     if (this.weixin.token) this.startWeixinUpdates();
   }
 
-  /** Install `dws` when the machine has none, trying multiple sources in turn. */
-  async ensureDws() {
+  /** Detect dws without installing anything. */
+  async checkDws() {
+    const check = await runDws(this.command, ['--version'], { timeoutMs: 15_000 });
+    if (check.code === 0 && /dws version/i.test(`${check.stdout}${check.stderr}`)) {
+      this.state.install = {
+        status: 'ready',
+        log: '',
+        source: String(this.config.dwsRegistry || DWS_REGISTRY_DEFAULT),
+        attempt: 0,
+        total: 0,
+      };
+      return true;
+    }
+    const registry = String(this.config.dwsRegistry || DWS_REGISTRY_DEFAULT);
+    this.state.install = {
+      status: 'missing',
+      log: `未安装 dws。点击「安装 dws v${DWS_PACKAGE_VERSION}」将全局安装 dingtalk-workspace-cli@${DWS_PACKAGE_VERSION}（来源：${registry}）。`,
+      source: registry,
+      attempt: 0,
+      total: 0,
+    };
+    this.broadcast();
+    return false;
+  }
+
+  /** Install `dws` only after an explicit user action, pinned version and registry. */
+  async installDws() {
     if (this.installPromise) return this.installPromise;
-    this.installPromise = this.runEnsureDws().finally(() => { this.installPromise = null; });
+    this.installPromise = this.runInstallDws().finally(() => { this.installPromise = null; });
     return this.installPromise;
   }
 
-  /** One install attempt chain: npmjs → npmmirror → official script. */
-  async runEnsureDws() {
-    const check = await runDws(this.command, ['--version'], { timeoutMs: 15_000 });
-    if (check.code === 0 && /dws version/i.test(`${check.stdout}${check.stderr}`)) {
-      this.state.install = { status: 'ready', log: '', source: '', attempt: 0, total: 0 };
-      return true;
-    }
+  /** One pinned install attempt; no automatic fallback or remote scripts. */
+  async runInstallDws() {
+    const registry = String(this.config.dwsRegistry || DWS_REGISTRY_DEFAULT).trim() || DWS_REGISTRY_DEFAULT;
     const nodeDir = process.platform === 'win32'
       ? process.execPath.replace(/[\\/]node\.exe$/i, '')
       : process.execPath.replace(/[\\/]bin[\\/]node$/i, '');
     const npm = await this.findNpm(nodeDir);
-    const sources = [];
-    if (npm) {
-      sources.push({ id: 'npmjs', label: 'npm 官方源', kind: 'npm', npm, registry: 'https://registry.npmjs.org/' });
-      sources.push({ id: 'npmmirror', label: 'npmmirror 镜像', kind: 'npm', npm, registry: 'https://registry.npmmirror.com' });
+    if (!npm) {
+      this.state.install = { status: 'error', log: '未找到 npm，无法安装 dws', source: registry, attempt: 1, total: 1 };
+      this.broadcast();
+      return false;
     }
-    if (process.platform === 'win32') {
-      sources.push({ id: 'github', label: '官方安装脚本', kind: 'ps1' });
-    }
-    if (sources.length === 0) {
-      this.state.install = { status: 'error', log: '未找到 npm，且没有可用安装源', source: '', attempt: 0, total: 0 };
+    this.state.install = {
+      status: 'installing',
+      source: registry,
+      attempt: 1,
+      total: 1,
+      log: `正在安装 dingtalk-workspace-cli@${DWS_PACKAGE_VERSION}（${registry}）…`,
+    };
+    this.broadcast();
+
+    const install = await runDws(npm, [
+      'install', '-g', `dingtalk-workspace-cli@${DWS_PACKAGE_VERSION}`,
+      '--no-fund', '--no-audit', `--registry=${registry}`,
+    ], { timeoutMs: 300_000 });
+    if (install.code !== 0) {
+      this.state.install = {
+        status: 'error',
+        log: sanitizeOutput(`${install.stdout}\n${install.stderr}`) || `npm 安装退出码 ${install.code}`,
+        source: registry,
+        attempt: 1,
+        total: 1,
+      };
       this.broadcast();
       return false;
     }
 
-    const failures = [];
-    for (let index = 0; index < sources.length; index += 1) {
-      const source = sources[index];
+    const root = await this.npmGlobalRoot(npm);
+    const pkgDir = join(root || join(nodeDir, 'node_modules'), 'dingtalk-workspace-cli');
+    const postinstall = join(pkgDir, 'install.js');
+    if (existsSync(postinstall)) {
+      const post = await runDws(process.execPath, [postinstall], {
+        timeoutMs: 180_000,
+        env: { ...process.env, DWS_NO_SKILLS: '1' },
+      });
+      if (post.code !== 0) {
+        this.state.install = {
+          status: 'error',
+          log: sanitizeOutput(`${post.stdout}\n${post.stderr}`) || `解包退出码 ${post.code}`,
+          source: registry,
+          attempt: 1,
+          total: 1,
+        };
+        this.broadcast();
+        return false;
+      }
+    }
+    const vendor = join(pkgDir, 'vendor', process.platform === 'win32' ? 'dws.exe' : 'dws');
+    if (existsSync(vendor)) this.command = vendor;
+
+    const verify = await runDws(this.command, ['--version'], { timeoutMs: 20_000 });
+    const versionText = `${verify.stdout}${verify.stderr}`;
+    if (verify.code !== 0 || !versionText.includes(DWS_PACKAGE_VERSION)) {
       this.state.install = {
-        status: 'installing',
-        source: source.id,
-        attempt: index + 1,
-        total: sources.length,
-        log: `正在尝试 ${source.label}（${index + 1}/${sources.length}）…`,
+        status: 'error',
+        log: sanitizeOutput(versionText) || `安装后版本校验失败（期望 ${DWS_PACKAGE_VERSION}）`,
+        source: registry,
+        attempt: 1,
+        total: 1,
       };
       this.broadcast();
-
-      let ok = false;
-      let detail = '';
-      if (source.kind === 'npm') {
-        const install = await runDws(source.npm, [
-          'install', '-g', 'dingtalk-workspace-cli', '--no-fund', '--no-audit',
-          `--registry=${source.registry}`,
-        ], { timeoutMs: 180_000 });
-        if (install.code !== 0) {
-          detail = sanitizeOutput(`${install.stdout}\n${install.stderr}`) || `退出码 ${install.code}`;
-        } else {
-          const root = await this.npmGlobalRoot(source.npm);
-          const pkgDir = join(root || join(nodeDir, 'node_modules'), 'dingtalk-workspace-cli');
-          const postinstall = join(pkgDir, 'install.js');
-          if (existsSync(postinstall)) {
-            const post = await runDws(process.execPath, [postinstall], {
-              timeoutMs: 180_000,
-              env: { ...process.env, DWS_NO_SKILLS: '1' },
-            });
-            if (post.code !== 0) detail = sanitizeOutput(`${post.stdout}\n${post.stderr}`) || `解包退出码 ${post.code}`;
-            else ok = true;
-          } else {
-            ok = true;
-          }
-          const vendor = join(pkgDir, 'vendor', process.platform === 'win32' ? 'dws.exe' : 'dws');
-          if (ok && existsSync(vendor)) this.command = vendor;
-        }
-      } else {
-        const ps = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-        const script = "$ErrorActionPreference='Stop'; irm https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.ps1 | iex";
-        const result = await runDws(ps, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], { timeoutMs: 240_000 });
-        ok = result.code === 0;
-        if (!ok) detail = sanitizeOutput(`${result.stdout}\n${result.stderr}`) || `退出码 ${result.code}`;
-      }
-
-      if (ok) {
-        const verify = await runDws(this.command, ['--version'], { timeoutMs: 20_000 });
-        if (verify.code === 0) {
-          this.state.install = { status: 'ready', log: '', source: source.id, attempt: index + 1, total: sources.length };
-          this.broadcast();
-          return true;
-        }
-        detail = sanitizeOutput(`${verify.stdout}\n${verify.stderr}`) || '安装后仍无法执行 dws';
-      }
-      failures.push(`${source.label}：${detail || '未知错误'}`);
+      return false;
     }
-
-    this.state.install = {
-      status: 'error',
-      source: '',
-      attempt: sources.length,
-      total: sources.length,
-      log: failures.join('\n').slice(-900),
-    };
+    this.state.install = { status: 'ready', log: '', source: registry, attempt: 1, total: 1 };
     this.broadcast();
-    return false;
+    return true;
   }
 
   /** Locate a usable npm executable (bundled runtime, PATH, or npm_execpath). */
@@ -830,13 +841,13 @@ export class BridgeService {
     if (this.loginChild) return;
     this.state.login = { active: true, code: '', url: '', error: '' };
     this.broadcast();
-    const ready = await this.ensureDws();
+    const ready = await this.checkDws();
     if (!ready) {
       this.state.login = {
         active: false,
         code: '',
         url: '',
-        error: `dws 未安装且自动安装失败：${this.state.install.log || '请检查网络后重试'}`,
+        error: `dws 未安装，请先在设置页点击「安装 dws v${DWS_PACKAGE_VERSION}」（固定版本，需你确认）。`,
       };
       this.broadcast();
       return;
@@ -971,7 +982,7 @@ export class BridgeService {
       } else if (type === 'login-start') {
         await this.startLogin();
       } else if (type === 'install-dws') {
-        await this.ensureDws();
+        await this.installDws();
       } else if (type === 'login-cancel') {
         this.cancelLogin();
       } else if (type === 'reset-quota') {

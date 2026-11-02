@@ -28,4 +28,6 @@ export const Config = Schema.object({
   maxTotalChars: Schema.number().min(200).max(10000).default(3500)
     .description('单条合并推送的最大字符数'),
   dwsPath: Schema.string().default('dws').description('dws 可执行文件路径（默认 PATH 中的 dws）'),
+  dwsRegistry: Schema.string().default('https://registry.npmjs.org/')
+    .description('安装 dws 时固定使用的 npm 源（仅在用户点击「安装 dws」时生效）'),
 });

@@ -114,16 +114,21 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.row },
             h('span', { style: styles.muted }, `投递通道：${state.wechat?.channel === 'clawbot' ? 'PushPlus ClawBot' : '微信机器人（本插件扫码）'}${channels.pushplus ? ' + PushPlus' : ''}${channels.wxpusher ? ' + WxPusher' : ''}`),
             h('span', { style: styles.muted }, `dws：${state.install?.status === 'ready'
-              ? '已就绪'
+              ? '已就绪（v1.0.66）'
               : state.install?.status === 'installing'
-                ? `安装中（${state.install.source || '...'} ${state.install.attempt ?? 1}/${state.install.total ?? 1}）`
-                : state.install?.status === 'error' ? '安装失败' : '检测中'}`),
+                ? `安装中（${state.install.source || '...'}）`
+                : state.install?.status === 'error'
+                  ? '安装失败'
+                  : state.install?.status === 'missing' ? '未安装' : '检测中'}`),
             state.install?.status !== 'ready'
               ? h('button', {
                 style: styles.button,
-                onClick: () => act('install-dws'),
+                onClick: () => {
+                  if (!window.confirm('将全局安装 dingtalk-workspace-cli@1.0.66（固定版本，来源 npm 官方源），是否继续？')) return;
+                  act('install-dws');
+                },
                 disabled: busy === 'install-dws' || state.install?.status === 'installing',
-              }, busy === 'install-dws' || state.install?.status === 'installing' ? '安装中…' : '安装 dws')
+              }, busy === 'install-dws' || state.install?.status === 'installing' ? '安装中…' : '安装 dws v1.0.66')
               : null,
           ),
           state.install?.log
@@ -292,7 +297,7 @@ window.__ModuleLoader__.load({
           ? h('div', { style: styles.card },
             h('div', { style: styles.title }, '使用说明'),
             h('ol', { style: { margin: '4px 0 0 18px', padding: 0, lineHeight: '1.8' } },
-              h('li', null, '等待「dws：已就绪」；若显示安装失败，点「安装 dws」或手动执行 npm i -g dingtalk-workspace-cli。'),
+              h('li', null, '若显示「dws：未安装」，点「安装 dws v1.0.66」并在确认框中同意；插件不会在启动时自动安装。'),
               h('li', null, '钉钉：点「钉钉扫码/设备码登录」，用钉钉完成授权（组织需已开通 CLI 数据访问）。'),
               h('li', null, '微信：点「微信扫码登录」，用微信扫码绑定机器人。'),
               h('li', null, '首次关键一步：在微信里主动给机器人发一条消息（如「你好」），建立推送上下文；否则不会收到推送。'),
