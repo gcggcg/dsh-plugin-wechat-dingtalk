@@ -16,7 +16,12 @@ export const Config = Schema.object({
     .description('WxPusher SPT（备用通道，ClawBot 配额满时使用）'),
   wechatChannel: Schema.string().default('ilink')
     .description('微信投递通道：ilink（本插件自带扫码登录）或 clawbot（PushPlus）'),
-  includeGroupAt: Schema.boolean().default(true).description('转发群里 @我 的消息'),
+  listenDirect: Schema.boolean().default(true)
+    .description('监听私信（1:1 消息）'),
+  listenGroupAt: Schema.boolean().default(true)
+    .description('监听群 @我 的消息'),
+  includeGroupAt: Schema.boolean().default(true)
+    .description('（已废弃）等价于 listenGroupAt，仅兼容旧配置'),
   atPrefix: Schema.boolean().default(true).description('群 @ 消息加 [@] 前缀'),
   maxCharsPerMessage: Schema.number().min(20).max(2000).default(200)
     .description('单条消息正文截断长度'),

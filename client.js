@@ -199,12 +199,37 @@ window.__ModuleLoader__.load({
 
         h('div', { style: styles.card },
           h('div', { style: styles.title }, '监听器'),
+          h('div', { style: styles.row },
+            h('label', { style: { display: 'flex', gap: '6px', alignItems: 'center', cursor: 'pointer' } },
+              h('input', {
+                type: 'checkbox',
+                checked: state.listen?.direct !== false,
+                onChange: (event) => act('set-listen-flags', {
+                  direct: event.target.checked,
+                  groupAt: state.listen?.groupAt !== false,
+                }),
+              }),
+              '私信',
+            ),
+            h('label', { style: { display: 'flex', gap: '6px', alignItems: 'center', cursor: 'pointer' } },
+              h('input', {
+                type: 'checkbox',
+                checked: state.listen?.groupAt !== false,
+                onChange: (event) => act('set-listen-flags', {
+                  direct: state.listen?.direct !== false,
+                  groupAt: event.target.checked,
+                }),
+              }),
+              '群 @我',
+            ),
+            h('span', { style: styles.muted }, '切换后自动重启监听器'),
+          ),
           listeners.length === 0
-            ? h('div', { style: styles.muted }, '没有运行中的监听器')
+            ? h('div', { style: styles.muted }, '没有运行中的监听器（两个开关都关闭时不会监听）')
             : h('div', { style: styles.list }, listeners.map(([profile, entry]) => h('div', { key: profile, style: styles.item },
               h('span', { style: styles.dot(entry.status === 'online') }),
               ` ${entry.userName || profile}：${entry.status}`,
-              h('span', { style: styles.muted }, ` · 已收 ${entry.received} 条 · 重启 ${entry.restarts} 次`),
+              h('span', { style: styles.muted }, ` · 已收 ${entry.received} 条（私信 ${entry.dmReceived ?? 0} / @ ${entry.atReceived ?? 0}） · 重启 ${entry.restarts} 次`),
               entry.lastError ? h('div', { style: { color: '#ef4444' } }, entry.lastError) : null,
             ))),
         ),

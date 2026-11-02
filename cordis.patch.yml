@@ -5,6 +5,7 @@
         enabled: true
         mergeWindowSec: 60
         dingtalkProfiles: []
-        includeGroupAt: true
+        listenDirect: true
+        listenGroupAt: true
         atPrefix: true
         wechatChannel: ilink

@@ -81,12 +81,17 @@ export class BridgeService {
       cursor: '',
     };
     this.sendsSinceContext = 0;
+    this.listenFlags = {
+      direct: this.config.listenDirect !== false,
+      groupAt: (this.config.listenGroupAt ?? this.config.includeGroupAt) !== false,
+    };
     this.state = {
       enabled: this.config.enabled !== false,
       quota: { pushes: 0, warned: false, blocked: false },
       lastPush: null,
       login: { active: false, code: '', url: '', error: '' },
       recent: [],
+      listen: { ...this.listenFlags },
       wechat: {
         channel: String(this.config.wechatChannel || 'ilink'),
         bound: false,
@@ -193,10 +198,13 @@ export class BridgeService {
       this.weixin.contextToken = String(parsed?.contextToken ?? '');
       this.weixin.cursor = String(parsed?.cursor ?? '');
       if (Number(parsed?.mergeWindowSec) >= 10) this.runtimeMergeWindow = Number(parsed.mergeWindowSec);
+      if (typeof parsed?.listenDirect === 'boolean') this.listenFlags.direct = parsed.listenDirect;
+      if (typeof parsed?.listenGroupAt === 'boolean') this.listenFlags.groupAt = parsed.listenGroupAt;
     } catch {
       /* first run */
     }
     this.syncWeixinState();
+    this.syncListenState();
   }
 
   /** Persist the WeChat bot session (0600 file under DSH_HOME). */
@@ -211,6 +219,8 @@ export class BridgeService {
         contextToken: this.weixin.contextToken,
         cursor: this.weixin.cursor,
         mergeWindowSec: this.effectiveMergeWindow(),
+        listenDirect: this.listenFlags.direct,
+        listenGroupAt: this.listenFlags.groupAt,
       }, null, 2), { encoding: 'utf8', mode: 0o600 });
     } catch (error) {
       this.state.wechat.login.error = `保存微信状态失败：${error.message}`;
@@ -223,6 +233,21 @@ export class BridgeService {
     this.state.wechat.ownerUserId = this.weixin.ownerUserId;
     this.state.wechat.hasContext = Boolean(this.weixin.contextToken);
     this.state.wechat.sendsSinceContext = this.sendsSinceContext;
+  }
+
+  /** Mirror the listener switches into the UI state. */
+  syncListenState() {
+    this.state.listen = { ...this.listenFlags };
+  }
+
+  /** Change what the listeners subscribe to and restart them. */
+  setListenFlags(direct, groupAt) {
+    this.listenFlags = { direct: direct !== false, groupAt: groupAt !== false };
+    this.syncListenState();
+    this.saveWeixinState().catch(() => {});
+    this.restartAllListeners();
+    this.broadcast();
+    return { ...this.listenFlags };
   }
 
   /** Effective merge window (runtime override > config). */
@@ -406,6 +431,11 @@ export class BridgeService {
 
   /** Start one listener per target profile. */
   startAllListeners() {
+    if (!this.listenFlags.direct && !this.listenFlags.groupAt) {
+      for (const profile of [...this.listeners.keys()]) this.stopListener(profile);
+      this.broadcast();
+      return;
+    }
     for (const profile of this.targetProfiles()) {
       if (!this.listeners.has(profile)) this.startListener(profile);
     }
@@ -413,14 +443,18 @@ export class BridgeService {
 
   // --------------------------------------------------------------- listeners
 
-  /** Spawn the combined DM + @me listener for one profile. */
+  /** Spawn the DM/@me listener for one profile according to the switches. */
   startListener(profile, restarts = 0) {
     const existing = this.listeners.get(profile);
     if (existing?.child && existing.child.exitCode === null) return;
+    const keys = [];
+    if (this.listenFlags.direct) keys.push(O2O_KEY);
+    if (this.listenFlags.groupAt) keys.push(AT_KEY);
+    if (keys.length === 0) return;
     const userName = this.profiles.find((item) => item.profile === profile)?.userName ?? '';
     const args = [
       '--profile', profile,
-      'event', 'consume', O2O_KEY, AT_KEY,
+      'event', 'consume', ...keys,
       '--flatten', '-f', 'ndjson',
     ];
     const child = spawnDws(this.command, args);
@@ -428,6 +462,8 @@ export class BridgeService {
       child,
       status: 'starting',
       received: this.receivedByProfile.get(profile) ?? existing?.received ?? 0,
+      dmReceived: existing?.dmReceived ?? 0,
+      atReceived: existing?.atReceived ?? 0,
       restarts,
       startedAt: Date.now(),
       lastReadyAt: existing?.lastReadyAt ?? 0,
@@ -572,7 +608,8 @@ export class BridgeService {
     if (!isObject(event)) return;
     const type = String(event.type ?? '');
     if (type !== O2O_KEY && type !== AT_KEY) return;
-    if (type === AT_KEY && this.config.includeGroupAt === false) return;
+    if (type === O2O_KEY && !this.listenFlags.direct) return;
+    if (type === AT_KEY && !this.listenFlags.groupAt) return;
 
     const sender = String(event.sender ?? '');
     const senderId = String(event.sender_open_dingtalk_id ?? '');
@@ -581,6 +618,8 @@ export class BridgeService {
     if (entry) {
       entry.received += 1;
       entry.lastEventAt = Date.now();
+      if (type === AT_KEY) entry.atReceived = (entry.atReceived ?? 0) + 1;
+      else entry.dmReceived = (entry.dmReceived ?? 0) + 1;
       this.receivedByProfile.set(profile, entry.received);
     }
 
@@ -634,7 +673,7 @@ export class BridgeService {
       const prefix = message.kind === 'at' && this.config.atPrefix !== false ? '[@] ' : '';
       return `${prefix}${message.sender}：${clip(message.text, perMessage)}`;
     });
-    let content = lines.join('\n');
+    let content = lines.join('\n\n');
     if (content.length > maxTotal) content = `${content.slice(0, maxTotal - 20)}\n…（已截断）`;
     await this.deliver(content);
   }
@@ -806,6 +845,8 @@ export class BridgeService {
         this.cancelWechatLogin();
       } else if (type === 'set-merge-window') {
         this.setMergeWindow(payload?.seconds);
+      } else if (type === 'set-listen-flags') {
+        this.setListenFlags(payload?.direct, payload?.groupAt);
       } else if (type === 'reset-subscription') {
         await this.resetSubscriptionProtection();
       } else if (type === 'wechat-check-context') {
@@ -861,6 +902,8 @@ export class BridgeService {
       listeners[profile] = {
         status: entry.status,
         received: entry.received,
+        dmReceived: entry.dmReceived ?? 0,
+        atReceived: entry.atReceived ?? 0,
         restarts: entry.restarts,
         userName: entry.userName,
         lastReadyAt: entry.lastReadyAt,
@@ -875,6 +918,7 @@ export class BridgeService {
       currentProfile: this.currentProfile,
       profiles: this.profiles,
       targetProfiles: this.targetProfiles(),
+      listen: { ...this.listenFlags },
       listeners,
       recent: this.state.recent,
       quota: this.state.quota,
