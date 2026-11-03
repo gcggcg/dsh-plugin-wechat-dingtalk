@@ -102,6 +102,10 @@ window.__ModuleLoader__.load({
 
       const listeners = Object.entries(state.listeners ?? {});
       const channels = state.channels ?? {};
+      const install = state.install ?? {};
+      const currentVersion = install.currentVersion || '';
+      const latestVersion = install.latestVersion || '';
+      const updateAvailable = Boolean(install.status === 'ready' && latestVersion && currentVersion && latestVersion !== currentVersion);
 
       return h('div', { style: styles.page },
         h('div', { style: styles.card },
@@ -113,33 +117,55 @@ window.__ModuleLoader__.load({
           ),
           h('div', { style: styles.row },
             h('span', { style: styles.muted }, `投递通道：${state.wechat?.channel === 'clawbot' ? 'PushPlus ClawBot' : '微信机器人（本插件扫码）'}${channels.pushplus ? ' + PushPlus' : ''}${channels.wxpusher ? ' + WxPusher' : ''}`),
-            h('span', { style: styles.muted }, `dws：${state.install?.status === 'ready'
-              ? '已就绪（v1.0.66）'
-              : state.install?.status === 'installing'
-                ? `安装中（${state.install.source || '...'}）`
-                : state.install?.status === 'error'
+            h('span', { style: styles.muted }, `dws：${install.status === 'ready'
+              ? `已就绪（v${currentVersion || '?'}）${updateAvailable ? `，发现新版 v${latestVersion}` : ''}`
+              : install.status === 'installing'
+                ? `安装中（${install.targetVersion ? `v${install.targetVersion}，` : ''}${install.source || '...'}）`
+                : install.status === 'error'
                   ? '安装失败'
-                  : state.install?.status === 'missing' ? '未安装' : '检测中'}`),
-            state.install?.status !== 'ready'
+                  : install.status === 'missing' ? '未安装' : '检测中'}`),
+            install.status === 'ready'
+              ? h('button', {
+                style: styles.button,
+                onClick: () => act('check-dws-update'),
+                disabled: busy === 'check-dws-update',
+              }, busy === 'check-dws-update' ? '检查中…' : '检查更新')
+              : null,
+            install.status === 'ready' && updateAvailable
+              ? h('button', {
+                style: styles.primary,
+                onClick: () => {
+                  const source = install.source || '配置的 npm 源';
+                  if (!window.confirm(`将更新 dingtalk-workspace-cli 到 v${latestVersion}（来源：${source}），是否继续？`)) return;
+                  act('update-dws', { version: latestVersion });
+                },
+                disabled: busy === 'update-dws',
+              }, busy === 'update-dws' ? '更新中…' : `更新到 v${latestVersion}`)
+              : null,
+            install.status !== 'ready'
               ? h('button', {
                 style: styles.button,
                 onClick: () => {
-                  if (!window.confirm('将全局安装 dingtalk-workspace-cli@1.0.66（固定版本，来源 npm 官方源），是否继续？')) return;
+                  const source = install.source || '配置的 npm 源';
+                  if (!window.confirm(`将全局安装 dingtalk-workspace-cli@1.0.66（来源：${source}），是否继续？`)) return;
                   act('install-dws');
                 },
-                disabled: busy === 'install-dws' || state.install?.status === 'installing',
-              }, busy === 'install-dws' || state.install?.status === 'installing' ? '安装中…' : '安装 dws v1.0.66')
+                disabled: busy === 'install-dws' || install.status === 'installing',
+              }, busy === 'install-dws' || install.status === 'installing' ? '安装中…' : '安装 dws v1.0.66')
               : null,
           ),
-          state.install?.log
+          install.log
             ? h('div', {
               style: {
-                color: state.install?.status === 'error' ? '#ef4444' : '#6b7280',
+                color: install.status === 'error' ? '#ef4444' : '#6b7280',
                 fontSize: '12px',
                 whiteSpace: 'pre-wrap',
                 wordBreak: 'break-all',
               },
-            }, state.install.log)
+            }, install.log)
+            : null,
+          install.latestError
+            ? h('div', { style: { color: '#f59e0b', fontSize: '12px' } }, `检查更新失败：${install.latestError}`)
             : null,
           h('div', { style: styles.row },
             h('span', { style: styles.muted }, '合并窗口'),

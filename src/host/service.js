@@ -111,7 +111,18 @@ export class BridgeService {
         sendsSinceContext: 0,
         login: { active: false, qrcodeUrl: '', status: '', error: '' },
       },
-      install: { status: 'unknown', log: '', source: '', attempt: 0, total: 0 },
+      install: {
+        status: 'unknown',
+        log: '',
+        source: '',
+        currentVersion: '',
+        latestVersion: '',
+        targetVersion: '',
+        updateAvailable: false,
+        latestError: '',
+        attempt: 0,
+        total: 0,
+      },
     };
     this.installPromise = null;
   }
@@ -144,29 +155,45 @@ export class BridgeService {
   async bootstrap() {
     await this.loadWeixinState();
     await this.checkDws();
+    this.checkLatestDws().catch(() => {});
     await this.refreshProfiles();
     this.startAllListeners();
     if (this.weixin.token) this.startWeixinUpdates();
   }
 
+  /** Registry used for install and update checks. */
+  dwsRegistry() {
+    const value = typeof this.config.dwsRegistry === 'string' ? this.config.dwsRegistry.trim() : '';
+    return value === '' ? DWS_REGISTRY_DEFAULT : value;
+  }
+
   /** Detect dws without installing anything. */
   async checkDws() {
     const check = await runDws(this.command, ['--version'], { timeoutMs: 15_000 });
-    if (check.code === 0 && /dws version/i.test(`${check.stdout}${check.stderr}`)) {
+    const text = `${check.stdout}${check.stderr}`;
+    if (check.code === 0 && /dws version/i.test(text)) {
+      const version = /(\d+\.\d+\.\d+)/.exec(text)?.[1] ?? '';
+      const latest = this.state.install?.latestVersion ?? '';
       this.state.install = {
         status: 'ready',
         log: '',
-        source: String(this.config.dwsRegistry || DWS_REGISTRY_DEFAULT),
+        source: this.dwsRegistry(),
+        currentVersion: version,
+        latestVersion: latest,
+        updateAvailable: Boolean(latest && version && latest !== version),
         attempt: 0,
         total: 0,
       };
       return true;
     }
-    const registry = String(this.config.dwsRegistry || DWS_REGISTRY_DEFAULT);
+    const latest = this.state.install?.latestVersion ?? '';
     this.state.install = {
       status: 'missing',
-      log: `未安装 dws。点击「安装 dws v${DWS_PACKAGE_VERSION}」将全局安装 dingtalk-workspace-cli@${DWS_PACKAGE_VERSION}（来源：${registry}）。`,
-      source: registry,
+      log: `未安装 dws。点击「安装 dws v${DWS_PACKAGE_VERSION}」将全局安装 dingtalk-workspace-cli@${DWS_PACKAGE_VERSION}（来源：${this.dwsRegistry()}）。`,
+      source: this.dwsRegistry(),
+      currentVersion: '',
+      latestVersion: latest,
+      updateAvailable: false,
       attempt: 0,
       total: 0,
     };
@@ -174,36 +201,75 @@ export class BridgeService {
     return false;
   }
 
-  /** Install `dws` only after an explicit user action, pinned version and registry. */
-  async installDws() {
+  /** Query the configured registry for the latest dws version (never installs). */
+  async checkLatestDws() {
+    const base = this.dwsRegistry().replace(/\/+$/, '');
+    try {
+      const response = await fetch(`${base}/dingtalk-workspace-cli/latest`, {
+        headers: { accept: 'application/json' },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      const latest = String(data?.version ?? '');
+      if (!/^\d+\.\d+\.\d+/.test(latest)) throw new Error('registry 返回了无效版本');
+      const current = this.state.install?.currentVersion ?? '';
+      this.state.install = {
+        ...this.state.install,
+        latestVersion: latest,
+        updateAvailable: Boolean(current && latest !== current && this.state.install?.status === 'ready'),
+        latestError: '',
+      };
+    } catch (error) {
+      this.state.install = { ...this.state.install, latestError: sanitizeOutput(error.message) };
+    }
+    this.broadcast();
+    return this.state.install.latestVersion ?? '';
+  }
+
+  /** Install or update dws only after explicit user action: pinned target + fixed registry. */
+  async installDws(version) {
     if (this.installPromise) return this.installPromise;
-    this.installPromise = this.runInstallDws().finally(() => { this.installPromise = null; });
+    const target = String(version || DWS_PACKAGE_VERSION).trim() || DWS_PACKAGE_VERSION;
+    this.installPromise = this.runInstallDws(target).finally(() => { this.installPromise = null; });
     return this.installPromise;
   }
 
   /** One pinned install attempt; no automatic fallback or remote scripts. */
-  async runInstallDws() {
-    const registry = String(this.config.dwsRegistry || DWS_REGISTRY_DEFAULT).trim() || DWS_REGISTRY_DEFAULT;
+  async runInstallDws(target) {
+    const registry = this.dwsRegistry();
     const nodeDir = process.platform === 'win32'
       ? process.execPath.replace(/[\\/]node\.exe$/i, '')
       : process.execPath.replace(/[\\/]bin[\\/]node$/i, '');
     const npm = await this.findNpm(nodeDir);
     if (!npm) {
-      this.state.install = { status: 'error', log: '未找到 npm，无法安装 dws', source: registry, attempt: 1, total: 1 };
+      this.state.install = {
+        status: 'error',
+        log: '未找到 npm，无法安装 dws',
+        source: registry,
+        currentVersion: this.state.install?.currentVersion ?? '',
+        latestVersion: this.state.install?.latestVersion ?? '',
+        targetVersion: target,
+        attempt: 1,
+        total: 1,
+      };
       this.broadcast();
       return false;
     }
     this.state.install = {
       status: 'installing',
       source: registry,
+      targetVersion: target,
+      currentVersion: this.state.install?.currentVersion ?? '',
+      latestVersion: this.state.install?.latestVersion ?? '',
       attempt: 1,
       total: 1,
-      log: `正在安装 dingtalk-workspace-cli@${DWS_PACKAGE_VERSION}（${registry}）…`,
+      log: `正在安装 dingtalk-workspace-cli@${target}（${registry}）…`,
     };
     this.broadcast();
 
     const install = await runDws(npm, [
-      'install', '-g', `dingtalk-workspace-cli@${DWS_PACKAGE_VERSION}`,
+      'install', '-g', `dingtalk-workspace-cli@${target}`,
       '--no-fund', '--no-audit', `--registry=${registry}`,
     ], { timeoutMs: 300_000 });
     if (install.code !== 0) {
@@ -211,6 +277,9 @@ export class BridgeService {
         status: 'error',
         log: sanitizeOutput(`${install.stdout}\n${install.stderr}`) || `npm 安装退出码 ${install.code}`,
         source: registry,
+        currentVersion: this.state.install?.currentVersion ?? '',
+        latestVersion: this.state.install?.latestVersion ?? '',
+        targetVersion: target,
         attempt: 1,
         total: 1,
       };
@@ -231,6 +300,9 @@ export class BridgeService {
           status: 'error',
           log: sanitizeOutput(`${post.stdout}\n${post.stderr}`) || `解包退出码 ${post.code}`,
           source: registry,
+          currentVersion: this.state.install?.currentVersion ?? '',
+          latestVersion: this.state.install?.latestVersion ?? '',
+          targetVersion: target,
           attempt: 1,
           total: 1,
         };
@@ -243,18 +315,30 @@ export class BridgeService {
 
     const verify = await runDws(this.command, ['--version'], { timeoutMs: 20_000 });
     const versionText = `${verify.stdout}${verify.stderr}`;
-    if (verify.code !== 0 || !versionText.includes(DWS_PACKAGE_VERSION)) {
+    if (verify.code !== 0 || !versionText.includes(target)) {
       this.state.install = {
         status: 'error',
-        log: sanitizeOutput(versionText) || `安装后版本校验失败（期望 ${DWS_PACKAGE_VERSION}）`,
+        log: sanitizeOutput(versionText) || `安装后版本校验失败（期望 ${target}）`,
         source: registry,
+        currentVersion: this.state.install?.currentVersion ?? '',
+        latestVersion: this.state.install?.latestVersion ?? '',
+        targetVersion: target,
         attempt: 1,
         total: 1,
       };
       this.broadcast();
       return false;
     }
-    this.state.install = { status: 'ready', log: '', source: registry, attempt: 1, total: 1 };
+    this.state.install = {
+      status: 'ready',
+      log: '',
+      source: registry,
+      currentVersion: target,
+      latestVersion: this.state.install?.latestVersion ?? '',
+      updateAvailable: false,
+      attempt: 1,
+      total: 1,
+    };
     this.broadcast();
     return true;
   }
@@ -982,7 +1066,11 @@ export class BridgeService {
       } else if (type === 'login-start') {
         await this.startLogin();
       } else if (type === 'install-dws') {
-        await this.installDws();
+        await this.installDws(payload?.version);
+      } else if (type === 'update-dws') {
+        await this.installDws(payload?.version || this.state.install?.latestVersion || DWS_PACKAGE_VERSION);
+      } else if (type === 'check-dws-update') {
+        await this.checkLatestDws();
       } else if (type === 'login-cancel') {
         this.cancelLogin();
       } else if (type === 'reset-quota') {
