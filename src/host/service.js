@@ -15,7 +15,7 @@
 import { spawnDws, runDws, killTree, createLineReader, parseDeviceFlow, resolveDwsCommand, toText } from './dws.js';
 import { pushClawBot, pushWxPusher } from './push.js';
 import { beginLogin as beginWeixinLogin, pollLogin as pollWeixinLogin, getUpdates as getWeixinUpdates, sendText as sendWeixinText, inboundContext } from './weixin.js';
-import { readFile, mkdir, writeFile, unlink } from 'node:fs/promises';
+import { readFile, mkdir, writeFile, rename, unlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -27,6 +27,7 @@ const AT_KEY = 'user_im_message_receive_at';
 const MAX_RECENT = 20;
 const QUOTA_WARN = 8;
 const QUOTA_BLOCK = 10;
+const QUOTA_LIMIT = 10;
 const DWS_PACKAGE_VERSION = '1.0.66';
 const DWS_REGISTRY_DEFAULT = 'https://registry.npmjs.org/';
 
@@ -98,7 +99,18 @@ export class BridgeService {
     };
     this.state = {
       enabled: this.config.enabled !== false,
-      quota: { pushes: 0, warned: false, blocked: false },
+      quota: {
+        enabled: true,
+        pushes: 0,
+        warned: false,
+        blocked: false,
+        alert: null,
+        alertId: 0,
+        firstPushNotified: false,
+        limitAlerted: false,
+        lastInboundAt: 0,
+        lastPushAt: 0,
+      },
       lastPush: null,
       login: { active: false, code: '', url: '', error: '' },
       recent: [],
@@ -125,6 +137,7 @@ export class BridgeService {
       },
     };
     this.installPromise = null;
+    this.saveWeixinPromise = Promise.resolve();
   }
 
   /** Resolve profiles in the background, then start listeners. */
@@ -387,6 +400,23 @@ export class BridgeService {
       this.weixin.ownerUserId = String(parsed?.ownerUserId ?? '');
       this.weixin.contextToken = String(parsed?.contextToken ?? '');
       this.weixin.cursor = String(parsed?.cursor ?? '');
+      const quota = parsed?.quota;
+      if (quota && typeof quota === 'object') {
+        this.state.quota = {
+          ...this.state.quota,
+          enabled: quota.enabled !== false,
+          pushes: Math.max(0, Number(quota.pushes) || 0),
+          warned: quota.warned === true,
+          blocked: quota.blocked === true,
+          alert: quota.alert === 'first' || quota.alert === 'limit' ? quota.alert : null,
+          alertId: Math.max(0, Number(quota.alertId) || 0),
+          firstPushNotified: quota.firstPushNotified === true,
+          limitAlerted: quota.limitAlerted === true,
+          lastInboundAt: Math.max(0, Number(quota.lastInboundAt) || 0),
+          lastPushAt: Math.max(0, Number(quota.lastPushAt) || 0),
+        };
+        this.sendsSinceContext = this.state.quota.pushes;
+      }
       if (Number(parsed?.mergeWindowSec) >= 10) this.runtimeMergeWindow = Number(parsed.mergeWindowSec);
       if (typeof parsed?.listenDirect === 'boolean') this.listenFlags.direct = parsed.listenDirect;
       if (typeof parsed?.listenGroupAt === 'boolean') this.listenFlags.groupAt = parsed.listenGroupAt;
@@ -398,31 +428,132 @@ export class BridgeService {
   }
 
   /** Persist the WeChat bot session (0600 file under DSH_HOME). */
-  async saveWeixinState() {
-    try {
-      const path = this.weixinStatePath();
+  saveWeixinState() {
+    const path = this.weixinStatePath();
+    const payload = JSON.stringify({
+      botToken: this.weixin.token,
+      baseUrl: this.weixin.baseUrl,
+      ownerUserId: this.weixin.ownerUserId,
+      contextToken: this.weixin.contextToken,
+      cursor: this.weixin.cursor,
+      mergeWindowSec: this.effectiveMergeWindow(),
+      listenDirect: this.listenFlags.direct,
+      listenGroupAt: this.listenFlags.groupAt,
+      quota: { ...this.state.quota },
+    }, null, 2);
+    const temp = `${path}.${process.pid}.tmp`;
+
+    // Pushes complete in bursts, so serialize writes and swap the file in
+    // atomically; concurrent writeFile calls can otherwise interleave and
+    // leave invalid JSON behind.
+    const write = async () => {
       await mkdir(dirname(path), { recursive: true });
-      await writeFile(path, JSON.stringify({
-        botToken: this.weixin.token,
-        baseUrl: this.weixin.baseUrl,
-        ownerUserId: this.weixin.ownerUserId,
-        contextToken: this.weixin.contextToken,
-        cursor: this.weixin.cursor,
-        mergeWindowSec: this.effectiveMergeWindow(),
-        listenDirect: this.listenFlags.direct,
-        listenGroupAt: this.listenFlags.groupAt,
-      }, null, 2), { encoding: 'utf8', mode: 0o600 });
-    } catch (error) {
+      await writeFile(temp, payload, { encoding: 'utf8', mode: 0o600 });
+      await rename(temp, path);
+    };
+    const next = this.saveWeixinPromise.then(write, write).catch(async (error) => {
       this.state.wechat.login.error = `保存微信状态失败：${error.message}`;
-    }
+      try { await unlink(temp); } catch { /* best effort */ }
+    });
+    this.saveWeixinPromise = next;
+    return next;
   }
 
   /** Mirror the private session into the redacted UI state. */
   syncWeixinState() {
+    this.sendsSinceContext = this.state.quota?.pushes ?? this.sendsSinceContext;
     this.state.wechat.bound = Boolean(this.weixin.token && this.weixin.baseUrl);
     this.state.wechat.ownerUserId = this.weixin.ownerUserId;
     this.state.wechat.hasContext = Boolean(this.weixin.contextToken);
     this.state.wechat.sendsSinceContext = this.sendsSinceContext;
+  }
+
+  /** Raise one quota dialog; alertId lets the client dismiss a specific dialog. */
+  raiseQuotaAlert(kind) {
+    const quota = this.state.quota;
+    quota.alert = kind;
+    quota.alertId = (Number(quota.alertId) || 0) + 1;
+  }
+
+  /** Count one successful push and decide whether to show the quota dialog. */
+  notePush() {
+    const quota = this.state.quota;
+    quota.pushes = Math.max(0, Number(quota.pushes) || 0) + 1;
+    quota.lastPushAt = Date.now();
+    if (quota.pushes >= QUOTA_BLOCK) quota.blocked = true;
+    else if (quota.pushes >= QUOTA_WARN) quota.warned = true;
+
+    if (quota.enabled) {
+      if (!quota.firstPushNotified) {
+        quota.firstPushNotified = true;
+        this.raiseQuotaAlert('first');
+      } else if (quota.pushes >= QUOTA_LIMIT && !quota.limitAlerted) {
+        quota.limitAlerted = true;
+        this.raiseQuotaAlert('limit');
+      }
+    }
+
+    this.syncWeixinState();
+    this.saveWeixinState().catch(() => {});
+    this.broadcast();
+  }
+
+  /** Enable/disable the quota dialog; enabling re-checks the current window. */
+  setQuotaGuard(enabled) {
+    const quota = this.state.quota;
+    quota.enabled = enabled !== false;
+    if (!quota.enabled) {
+      quota.alert = null;
+    } else if (quota.pushes > 0) {
+      // Re-enabling the guard must not replay the first-push notice for a
+      // window that already has pushes; only surface a real limit.
+      quota.firstPushNotified = true;
+      if (quota.pushes >= QUOTA_LIMIT && !quota.limitAlerted) {
+        quota.limitAlerted = true;
+        this.raiseQuotaAlert('limit');
+      }
+    }
+    this.saveWeixinState().catch(() => {});
+    this.broadcast();
+    return quota.enabled;
+  }
+
+  /** Close the current dialog without resetting the push count. */
+  dismissQuotaAlert() {
+    this.state.quota.alert = null;
+    this.saveWeixinState().catch(() => {});
+    this.broadcast();
+  }
+
+  /** A new inbound WeChat message resets the official 10-push window. */
+  resetQuotaWindow() {
+    const quota = this.state.quota;
+    quota.pushes = 0;
+    quota.warned = false;
+    quota.blocked = false;
+    quota.alert = null;
+    quota.limitAlerted = false;
+    quota.lastInboundAt = Date.now();
+    this.sendsSinceContext = 0;
+    this.syncWeixinState();
+    this.saveWeixinState().catch(() => {});
+    this.broadcast();
+  }
+
+  /** Manual reset from the UI (does not replay the first-install notice). */
+  resetQuota() {
+    const quota = this.state.quota;
+    quota.pushes = 0;
+    quota.warned = false;
+    quota.blocked = false;
+    quota.alert = null;
+    quota.limitAlerted = false;
+    quota.firstPushNotified = true;
+    quota.lastInboundAt = Date.now();
+    this.sendsSinceContext = 0;
+    this.syncWeixinState();
+    this.saveWeixinState().catch(() => {});
+    this.broadcast();
   }
 
   /** Mirror the listener switches into the UI state. */
@@ -487,6 +618,7 @@ export class BridgeService {
       this.weixin.baseUrl = result.baseUrl;
       this.syncWeixinState();
       await this.saveWeixinState();
+      this.resetQuotaWindow();
       this.state.wechat.login = { active: false, qrcodeUrl: '', status: 'confirmed', error: '' };
       this.startWeixinUpdates();
       this.broadcast();
@@ -524,17 +656,14 @@ export class BridgeService {
             this.weixin.cursor = result.cursor;
             this.saveWeixinState().catch(() => {});
           }
+          let inbound = false;
           for (const message of result.messages) {
             const { from, context } = inboundContext(message);
             if (from) this.weixin.ownerUserId = from;
             if (context) this.weixin.contextToken = context;
-            if (from || context) {
-              this.sendsSinceContext = 0;
-              this.syncWeixinState();
-              this.saveWeixinState().catch(() => {});
-              this.broadcast();
-            }
+            if (from || context) inbound = true;
           }
+          if (inbound) this.resetQuotaWindow();
         } catch (error) {
           if (controller.signal.aborted) break;
           await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -565,9 +694,12 @@ export class BridgeService {
         if (from) this.weixin.ownerUserId = from;
         if (context) this.weixin.contextToken = context;
       }
-      if (result.messages.length > 0) this.sendsSinceContext = 0;
-      this.syncWeixinState();
-      await this.saveWeixinState();
+      if (result.messages.length > 0) {
+        this.resetQuotaWindow();
+      } else {
+        this.syncWeixinState();
+        await this.saveWeixinState();
+      }
       if (!this.weixin.ownerUserId) this.state.wechat.login.error = '还没有收到你的微信消息，请给机器人发一条消息后重试';
     } catch (error) {
       this.state.wechat.login.error = `检查微信消息失败：${error.message}`;
@@ -586,8 +718,6 @@ export class BridgeService {
       contextToken: this.weixin.contextToken,
       text: content,
     });
-    this.sendsSinceContext += 1;
-    this.syncWeixinState();
   }
 
   // ---------------------------------------------------------------- profiles
@@ -883,7 +1013,7 @@ export class BridgeService {
       if (this.weixin.token) {
         await this.sendViaWeixin(content);
         this.state.lastPush = { ok: true, at: Date.now(), channel: 'wechat' };
-        this.broadcast();
+        this.notePush();
         return;
       }
       if (!hasPushPlus && !hasWxPusher) {
@@ -896,22 +1026,19 @@ export class BridgeService {
     if (quota.blocked && hasWxPusher) {
       await pushWxPusher({ spt: this.config.wxpusherSpt, content });
       this.state.lastPush = { ok: true, at: Date.now(), channel: 'wxpusher' };
-      this.broadcast();
+      this.notePush();
       return;
     }
     if (hasPushPlus) {
       await pushClawBot({ token: this.config.pushplusToken, title: '钉钉消息', content });
-      quota.pushes += 1;
-      if (quota.pushes >= QUOTA_BLOCK) quota.blocked = true;
-      else if (quota.pushes >= QUOTA_WARN) quota.warned = true;
       this.state.lastPush = { ok: true, at: Date.now(), channel: 'clawbot' };
-      this.broadcast();
+      this.notePush();
       return;
     }
     if (hasWxPusher) {
       await pushWxPusher({ spt: this.config.wxpusherSpt, content });
       this.state.lastPush = { ok: true, at: Date.now(), channel: 'wxpusher' };
-      this.broadcast();
+      this.notePush();
       return;
     }
     this.state.lastPush = { ok: false, at: Date.now(), error: '未配置推送通道（PushPlus token / WxPusher SPT）' };
@@ -1074,8 +1201,11 @@ export class BridgeService {
       } else if (type === 'login-cancel') {
         this.cancelLogin();
       } else if (type === 'reset-quota') {
-        this.state.quota = { pushes: 0, warned: false, blocked: false };
-        this.broadcast();
+        this.resetQuota();
+      } else if (type === 'set-quota-guard') {
+        this.setQuotaGuard(payload?.enabled);
+      } else if (type === 'quota-dismiss') {
+        this.dismissQuotaAlert();
       } else {
         this.sendJson(res, 400, { ok: false, error: `unknown action: ${type}` });
         return;
@@ -1135,6 +1265,7 @@ export class BridgeService {
       listeners,
       recent: this.state.recent,
       quota: this.state.quota,
+      quotaLimit: QUOTA_LIMIT,
       lastPush: this.state.lastPush,
       login: this.state.login,
       wechat: this.state.wechat,

@@ -28,6 +28,28 @@ window.__ModuleLoader__.load({
       code: { fontFamily: 'ui-monospace, monospace', background: 'var(--dsw-alias-bg-secondary, #f3f4f6)', padding: '6px 8px', borderRadius: '6px', wordBreak: 'break-all' },
       list: { maxHeight: '220px', overflow: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' },
       item: { padding: '4px 0', borderBottom: '1px dashed var(--dsw-alias-border-default, #e5e7eb)' },
+      overlay: {
+        position: 'fixed',
+        inset: 0,
+        zIndex: 1000,
+        background: 'rgba(15, 23, 42, 0.42)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '20px',
+      },
+      modal: {
+        width: 'min(460px, 100%)',
+        background: 'var(--dsw-alias-bg-primary, #fff)',
+        color: 'var(--dsw-alias-text-primary, #111827)',
+        border: '1px solid var(--dsw-alias-border-default, #e5e7eb)',
+        borderRadius: '12px',
+        padding: '18px 20px',
+        boxShadow: '0 20px 50px rgba(15, 23, 42, 0.25)',
+      },
+      modalTitle: { fontWeight: 600, fontSize: '15px', marginBottom: '8px' },
+      modalBody: { lineHeight: 1.7, color: 'var(--dsw-alias-text-secondary, #4b5563)' },
+      modalActions: { display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '16px' },
     };
 
     async function call(type, extra) {
@@ -48,6 +70,7 @@ window.__ModuleLoader__.load({
       const [mergeInput, setMergeInput] = useState('');
       const [stars, setStars] = useState(null);
       const [showGuide, setShowGuide] = useState(false);
+      const [quotaDismissed, setQuotaDismissed] = useState(null);
 
       const load = useCallback(async () => {
         try {
@@ -106,6 +129,17 @@ window.__ModuleLoader__.load({
       const currentVersion = install.currentVersion || '';
       const latestVersion = install.latestVersion || '';
       const updateAvailable = Boolean(install.status === 'ready' && latestVersion && currentVersion && latestVersion !== currentVersion);
+      const quota = state.quota ?? {};
+      const quotaCount = Math.max(0, Number(quota.pushes) || 0);
+      const quotaLimit = Math.max(1, Number(state.quotaLimit) || 10);
+      const quotaEnabled = quota.enabled !== false;
+      const quotaAlert = quotaEnabled ? quota.alert : null;
+      const quotaAlertKey = quota.alertId ?? quota.alert;
+      const showQuotaModal = Boolean(quotaAlert) && quotaDismissed !== quotaAlertKey;
+      const dismissQuota = () => {
+        setQuotaDismissed(quotaAlertKey);
+        act('quota-dismiss');
+      };
 
       return h('div', { style: styles.page },
         h('div', { style: styles.card },
@@ -184,21 +218,11 @@ window.__ModuleLoader__.load({
             h('span', { style: styles.muted }, '秒'),
             h('button', { style: styles.button, onClick: () => act('set-merge-window', { seconds: Number(mergeInput) }) }, '保存'),
           ),
-          state.wechat?.channel === 'clawbot'
-            ? h('div', { style: styles.row },
-              h('span', { style: styles.muted }, `配额：已推 ${state.quota?.pushes ?? 0} 条`),
-              state.quota?.blocked ? h('span', { style: { color: '#ef4444' } }, 'ClawBot 配额已满，请在微信里回复 ClawBot 后点“重置配额”') : null,
-              state.quota?.warned && !state.quota?.blocked ? h('span', { style: { color: '#f59e0b' } }, '接近配额上限') : null,
-            )
-            : null,
           state.lastPush ? h('div', { style: { ...styles.row, ...styles.muted } },
             `最近推送：${state.lastPush.ok ? `成功（${state.lastPush.channel}）` : `失败 - ${state.lastPush.error}`}`,
           ) : null,
           h('div', { style: styles.row },
             h('button', { style: styles.button, onClick: () => act('test-push'), disabled: busy === 'test-push' }, busy === 'test-push' ? '发送中…' : '发送测试消息'),
-            state.wechat?.channel === 'clawbot'
-              ? h('button', { style: styles.button, onClick: () => act('reset-quota') }, '重置配额')
-              : null,
             h('button', { style: styles.button, onClick: () => act('restart') }, '重启监听'),
             h('button', { style: styles.button, onClick: () => act('reset-subscription') }, '重置订阅保护'),
           ),
@@ -234,9 +258,25 @@ window.__ModuleLoader__.load({
             state.wechat?.bound
               ? (state.wechat?.hasContext ? '已建立推送上下文，钉钉消息会直接推送到这个微信机器人。' : '请先在微信里给机器人发一条消息（任意内容），以建立推送上下文。')
               : '点击「微信扫码登录」，用微信扫描二维码完成绑定。'),
-          state.wechat?.bound
-            ? h('div', { style: { ...styles.muted, marginTop: '4px' } },
-              `自上次收到你的微信消息以来，已推送 ${state.wechat?.sendsSinceContext ?? 0} 条`)
+          state.wechat?.bound || quotaCount > 0
+            ? h('div', { style: { ...styles.row, marginTop: '6px' } },
+              h('span', { style: styles.muted }, `自上次收到你的微信消息以来，已推送 ${quotaCount} 条`),
+              h('label', { style: { display: 'flex', gap: '6px', alignItems: 'center', cursor: 'pointer' } },
+                h('input', {
+                  type: 'checkbox',
+                  checked: quotaEnabled,
+                  onChange: (event) => act('set-quota-guard', { enabled: event.target.checked }),
+                }),
+                '额度提醒',
+              ),
+              quotaEnabled
+                ? h('span', { style: styles.muted }, `达到 ${quotaLimit} 条自动提醒`)
+                : h('span', { style: styles.muted }, '已关闭'),
+              quotaCount >= quotaLimit
+                ? h('span', { style: { color: '#ef4444' } }, '已达到微信推送上限，请回复机器人重置')
+                : null,
+              h('button', { style: styles.button, onClick: () => act('reset-quota') }, '重置计数'),
+            )
             : null,
           notice ? h('div', { style: { color: '#2563eb', marginTop: '4px' } }, notice) : null,
         ),
@@ -328,6 +368,7 @@ window.__ModuleLoader__.load({
               h('li', null, '微信：点「微信扫码登录」，用微信扫码绑定机器人。'),
               h('li', null, '首次关键一步：在微信里主动给机器人发一条消息（如「你好」），建立推送上下文；否则不会收到推送。'),
               h('li', null, '让朋友发钉钉私信或在群里 @ 你，等待合并窗口后即可在微信收到。'),
+              h('li', null, '「微信」卡片显示自上次收到你消息以来的推送条数；首次推送或达到 10 条会弹窗提醒，可在卡片内关闭「额度提醒」。'),
               h('li', null, '若市场装到的是旧版本（pnpm 供应链观察期 minimumReleaseAge 会跳过刚发布的版本），可卸载后指定版本安装，或等待观察期结束。'),
             ),
             h('div', { style: { ...styles.muted, marginTop: '8px' } },
@@ -361,6 +402,27 @@ window.__ModuleLoader__.load({
         }, '🐞 提交 Issue'),
         h('span', { style: styles.muted }, '欢迎点赞或反馈问题'),
         ),
+
+        showQuotaModal
+          ? h('div', { style: styles.overlay, onClick: dismissQuota },
+            h('div', {
+              style: styles.modal,
+              onClick: (event) => event.stopPropagation(),
+            },
+            h('div', { style: styles.modalTitle },
+              quotaAlert === 'first' ? '微信推送额度提醒' : '微信推送数量达到上限'),
+            h('div', { style: styles.modalBody },
+              quotaAlert === 'first'
+                ? '这是安装后的首次推送。微信官方推送数量达到上限时，需要通过微信主动任意话术回复微信机器人进行自动重置，或者搭配配置合并推送时间窗口减少推送条数。'
+                : '微信官方推送数量达到上限，需要通过微信主动任意话术回复微信机器人进行自动重置，或者搭配配置合并推送时间窗口减少推送条数。',
+              h('div', { style: { marginTop: '8px' } }, `当前窗口已推送 ${quotaCount} 条（上限 ${quotaLimit} 条）。`),
+            ),
+            h('div', { style: styles.modalActions },
+              h('button', { style: styles.primary, onClick: dismissQuota }, '我知道了'),
+            ),
+            ),
+          )
+          : null,
       );
     }
 
