@@ -40,7 +40,7 @@
 ## 安装与版本说明
 
 - 插件市场安装受 pnpm 供应链策略（`minimumReleaseAge`）约束：**刚发布的版本在观察期内可能被跳过**，从而装到上一个版本；
-- 需要最新版时：卸载当前版本后指定版本安装（如 `dsh-plugin-wechat-dingtalk-bridge@0.1.5`），或等待观察期结束；
+- 需要最新版时：卸载当前版本后指定版本安装（如 `dsh-plugin-wechat-dingtalk-bridge@0.1.6`），或等待观察期结束；
 - `dws` 未安装时**不会自动安装**：设置页会显示「未安装」，点击「安装 dws v1.0.66」并在确认框中同意后，才执行 `npm install -g dingtalk-workspace-cli@1.0.66 --registry=<配置的固定源>`（默认 npm 官方源，可在配置中修改），不使用远程 PowerShell 脚本；
 - **版本更新**：启动/手动「检查更新」会查询配置源上的 `dingtalk-workspace-cli` 最新版本；发现新版时显示「更新到 vX」，由用户确认后按该固定版本安装，不会自动升级；
 - 安装/更新确认框会显示**实际使用的 npm 源**，便于核对。

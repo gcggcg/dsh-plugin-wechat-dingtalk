@@ -17,7 +17,19 @@ window.__ModuleLoader__.load({
     const ISSUES = `${REPO}/issues/new`;
 
     const styles = {
-      page: { padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: '14px', fontSize: '13px' },
+      page: {
+        padding: '16px 20px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '14px',
+        fontSize: '13px',
+        height: '100%',
+        flex: '1 1 auto',
+        minHeight: 0,
+        overflowY: 'auto',
+        boxSizing: 'border-box',
+        overscrollBehavior: 'contain',
+      },
       card: { border: '1px solid var(--dsw-alias-border-default, #e5e7eb)', borderRadius: '10px', padding: '12px 14px' },
       title: { fontWeight: 600, marginBottom: '8px', fontSize: '13px' },
       row: { display: 'flex', alignItems: 'center', gap: '8px', margin: '4px 0', flexWrap: 'wrap' },
